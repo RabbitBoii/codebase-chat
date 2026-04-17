@@ -150,20 +150,43 @@ The core lesson: **don't mix async config writes with synchronous reads in the a
 
 ---
 
+## LLM conversation — how I used AI as a thinking tool
+
+I used Claude to work through the RAG architecture before writing any code. Here's a condensed version of that conversation:
+
+**Me:**  
+> I want to build a VS Code extension where you can chat with your codebase. I'm thinking embeddings + vector store + LLM. What should the architecture look like and what should I cut to ship in 48 hours?
+
+**Claude:**
+> Core loop: index (chunk → embed → store) + query (embed question → similarity search → LLM with context). For 48h, cut: auth, multi-workspace, streaming responses, chunk deduplication, re-indexing diffs. Use HNSWLib — no server to spin up. Groq for LLM — free and fast. Two commands: index + query. One sidebar webview. That's it.
+
+**Me:**
+> Why RAG vs just dumping all files into the context?
+
+**Claude:**
+> Token limits. A real project has hundreds of thousands of tokens. You can't fit it. RAG retrieves only what's relevant for the question — 5 chunks instead of 500 files. Also cheaper and faster.
+
+**Me:**
+> What chunk size should I use for code?
+
+**Claude:**
+> 500 tokens with 50 overlap. Small enough that each chunk is one logical unit (a function, a block). Overlap prevents a function split across chunks from losing context. `RecursiveCharacterTextSplitter` respects newlines and brackets — use that over a naive splitter.
+
+This saved me a lot of trial and error on architecture decisions. The most valuable thing was getting the clarity to **cut scope aggressively** — no streaming, no Chroma server, no diff-based re-indexing — and just ship the core RAG loop working end-to-end.
+
+---
 
 ## What I'd do next with more time
 
-1. **Incremental re-indexing** — currently the whole project re-indexes on every click. A file-watcher + hash-based dirty tracking would only re-embed changed files.
+1. **Better chunking and retrieval strategies** — I used a fixed 500-token split with 50 overlap, which works but is pretty naive. I'd want to research AST-based chunking (splitting by function/class boundaries instead of character count) and experiment with reranking retrieved chunks before passing them to the LLM. This is probably the highest-leverage improvement for answer quality.
 
-2. **Streaming responses** — Groq supports streaming; piping chunks back to the webview via `postMessage` would make it feel much more responsive.
+2. **Incremental re-indexing** — right now the whole project re-indexes on every click. A file-watcher + hash-based dirty tracking would only re-embed changed files.
 
-3. **Smarter chunking** — parse TypeScript/Python ASTs and chunk by function/class boundary rather than raw character count. This would dramatically improve retrieval precision.
+3. **Streaming responses** — Groq supports it; piping chunks back to the webview via `postMessage` would make it feel a lot more responsive.
 
-4. **`.vscodeignore`-aware file walking** — currently I maintain a manual `EXCLUDE_DIRS` list. It should respect `.gitignore` and `.vscodeignore` automatically.
+4. **Conversation history** — every question is currently independent. Passing the last few turns as context would enable natural follow-ups like "what about the error handling in that function?".
 
-5. **Conversation history** — right now every question is independent. Passing the last N turns as context to the LLM would enable follow-up questions like "what about the error handling in that function?".
-
-6. **Publish to VS Code marketplace** — package as `.vsix` and submit. Would need to handle API key setup UX more gracefully (prompt on first use instead of relying on `.env`).
+5. **Publish to VS Code marketplace** — package as `.vsix` and submit. Would need to handle API key setup UX more gracefully (prompt on first use instead of relying on `.env`).
 
 ---
 
