@@ -2,7 +2,11 @@
 
 > **Chat with your codebase.** Ask questions in plain English, get grounded answers from your actual source files — no hallucinations, no tab-switching.
 
----
+
+
+![Demo](./media/ss_1.png)
+
+
 
 ## What it does & the problem it solves
 
@@ -51,8 +55,8 @@ Real projects are too large for any context window and spread across dozens of f
 ### 1. Clone the repo
 
 ```bash
-git clone https://github.com/<your-username>/context-code-explainer.git
-cd context-code-explainer
+git clone https://github.com/<your-username>/codebase-chat.git
+cd codebase-chat
 ```
 
 ### 2. Install dependencies
