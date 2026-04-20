@@ -1,59 +1,83 @@
 import * as vscode from "vscode";
 import * as fs from "fs";
-import { OpenAIEmbeddings } from "@langchain/openai";
-import { HNSWLib } from "@langchain/community/vectorstores/hnswlib";
+import * as path from "path";
+import { OllamaEmbeddings } from "@langchain/ollama";
 import Groq from "groq-sdk";
+import { DocEntry, INDEX_FILE } from "./indexer";
 
-
-async function loadVectorStore(storagePath: string, apiKey: string): Promise<HNSWLib> {
-
-    const embeddings = new OpenAIEmbeddings({ openAIApiKey: apiKey });
-    return await HNSWLib.load(storagePath, embeddings);
-
+// Cosine similarity between two vectors
+function cosineSimilarity(a: number[], b: number[]): number {
+    let dot = 0, magA = 0, magB = 0;
+    for (let i = 0; i < a.length; i++) {
+        dot += a[i] * b[i];
+        magA += a[i] * a[i];
+        magB += b[i] * b[i];
+    }
+    return dot / (Math.sqrt(magA) * Math.sqrt(magB) + 1e-10);
 }
 
-export async function queryCodeBase(question: string, context: vscode.ExtensionContext): Promise<{ answer: string; sources: string[] }> {
+// Load the saved JSON index from disk
+function loadIndex(storagePath: string): DocEntry[] {
+    const indexPath = path.join(storagePath, INDEX_FILE);
+    const raw = fs.readFileSync(indexPath, 'utf-8');
+    return JSON.parse(raw) as DocEntry[];
+}
 
+// Find the k most similar chunks to a query embedding
+function topK(index: DocEntry[], queryEmbedding: number[], k: number): DocEntry[] {
+    return index
+        .map(entry => ({ entry, score: cosineSimilarity(queryEmbedding, entry.embedding) }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, k)
+        .map(r => r.entry);
+}
 
+export async function queryCodeBase(
+    question: string,
+    context: vscode.ExtensionContext
+): Promise<{ answer: string; sources: string[] }> {
 
-    // Get API keys from VS Code from settings
+    // Only Groq key is needed — Ollama handles embeddings locally for free
     const config = vscode.workspace.getConfiguration('codebaseChat');
-    const openaiKey = config.get<string>('openaiApiKey');
     const groqKey = config.get<string>('groqApiKey');
 
-    if (!openaiKey || !groqKey) {
+    if (!groqKey) {
         return {
-            answer: "Missing API keys, please set codebaseChat.openaiApiKey and codebaseChat.groqApiKey in settings.",
+            answer: "Missing Groq API key. Set it in Settings → codebaseChat.groqApiKey",
             sources: []
         };
     }
 
-    // Check if index exists
+    // Check if index file exists
     const storagePath = context.globalStorageUri.fsPath;
-    const indexExists = fs.existsSync(`${storagePath}/hnswlib.index`);
-    if (!indexExists) {
+    const indexPath = path.join(storagePath, INDEX_FILE);
+    if (!fs.existsSync(indexPath)) {
         return {
-            answer: 'Codebase not indexed yet. Run "Codebase Chat: Index Project" first.',
+            answer: 'Codebase not indexed yet. Click "⚡ Index Codebase" first.',
             sources: []
         };
     }
 
-    // Loading the vector store
-    const vectorStore = await loadVectorStore(storagePath, openaiKey);
+    // Load index + embed the query with Ollama
+    const index = loadIndex(storagePath);
+    const embedModel = new OllamaEmbeddings({
+        model: 'nomic-embed-text',
+        baseUrl: 'http://localhost:11434'
+    });
 
+    const queryEmbedding = await embedModel.embedQuery(question);
 
-    // Embed the query + similarity search with k = 5 for the 5 relevant chunks
-    const relevantDocs = await vectorStore.similaritySearch(question, 5);
+    // Find the 5 most relevant chunks via cosine similarity
+    const relevantDocs = topK(index, queryEmbedding, 5);
 
-    // Extracting sources for citation 
-    const sources = [...new Set(relevantDocs.map(doc => doc.metadata.source as string))];
+    // Unique source files for citation
+    const sources: string[] = [...new Set(relevantDocs.map(d => d.metadata.source))];
 
-    const context_str = relevantDocs.map(
-        doc => `// File: ${doc.metadata.source}\n${doc.pageContent}`
-    ).join(`\n\n---\n\n`);
+    const context_str = relevantDocs
+        .map(d => `// File: ${d.metadata.source}\n${d.pageContent}`)
+        .join('\n\n---\n\n');
 
-
-    const prompt = `You are an expert code assistant. You are helping a developer understand their codebase.
+    const prompt = `You are an expert code assistant helping a developer understand their codebase.
 
 Use ONLY the code snippets below to answer the question. If the answer isn't in the snippets, say so honestly.
 Always mention which file(s) the relevant code is in.
@@ -65,10 +89,9 @@ QUESTION: ${question}
 
 ANSWER:`;
 
-
     const groq = new Groq({ apiKey: groqKey });
     const completion = await groq.chat.completions.create({
-        model: 'llama3-70b-8192',
+        model: 'llama-3.1-8b-instant',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.2,
         max_tokens: 1024,
@@ -77,11 +100,4 @@ ANSWER:`;
     const answer = completion.choices[0]?.message?.content ?? 'No response from LLM';
 
     return { answer, sources };
-
-
 }
-
-
-
-
-
