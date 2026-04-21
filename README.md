@@ -26,10 +26,10 @@ Here's how it works end-to-end:
 Your project files
        │
        ▼
-  [ Indexer ]  — walks files, chunks them, embeds with OpenAI → saves HNSWLib vector store to disk
+  [ Indexer ]  — walks files, chunks them, embeds with Ollama (nomic-embed-text) → saves index to disk as JSON
        │
        ▼
-  [ Retriever ] — embeds your question, runs similarity search, pulls top-5 relevant chunks
+  [ Retriever ] — embeds your question via Ollama, runs cosine similarity search, pulls top-5 relevant chunks
        │
        ▼
   [ Groq LLM ] — receives question + retrieved code context → returns a grounded answer
@@ -49,7 +49,7 @@ Real projects are too large for any context window and spread across dozens of f
 
 - Node.js ≥ 18
 - VS Code ≥ 1.70
-- An OpenAI API key (for embeddings)
+- **[Ollama](https://ollama.com)** installed and running locally (for embeddings — free, no API key needed)
 - A Groq API key (for LLM responses — [get one free at console.groq.com](https://console.groq.com))
 
 ### 1. Clone the repo
@@ -65,33 +65,44 @@ cd codebase-chat
 npm install
 ```
 
-### 3. Add your API keys
+### 3. Start Ollama and pull the embedding model
 
-Create a `.env` file in the project root:
+```bash
+# Start the Ollama server (keep this running in the background)
+ollama serve
 
-```env
-OPEN_AI_API_KEY=sk-...
-GROQ_API_KEY=gsk_...
+# In a separate terminal, pull the embedding model
+ollama pull nomic-embed-text
 ```
 
-> **Note:** `.env` is in `.gitignore` — your keys are never committed.
+> **Note:** Ollama must be running at `http://localhost:11434` whenever you index or query. If you see a `fetch failed` error, this is why.
 
-### 4. Compile
+### 4. Set your Groq API key
+
+Open VS Code Settings (`Ctrl+,`), search for **Codebase Chat**, and paste your Groq API key into `codebaseChat.groqApiKey`.
+
+> You no longer need an OpenAI API key — embeddings are handled locally by Ollama for free.
+
+### 5. Compile
 
 ```bash
 npm run compile
 ```
 
-### 5. Launch the extension
+### 6. Launch the extension
 
 Press **F5** in VS Code. A new Extension Development Host window opens.
 
-### 6. Use it
+### 7. Use it
 
 1. Open any project folder in the Extension Development Host window
 2. Click the **Codebase Chat** icon in the Activity Bar (left sidebar)
-3. Click **⚡ Index Codebase** — this walks your files, chunks them, and builds the vector store (takes ~30s for a medium project)
+3. Click **⚡ Index Codebase** — this walks your files, chunks them, and embeds them via Ollama. Progress is shown in the notification area. The index is saved to VS Code's global storage as `codebase-index.json`.
 4. Type any question and hit **Ask** (or `Ctrl+Enter`)
+
+> **Where is the index stored?**  
+> `C:\Users\<you>\AppData\Roaming\Code\User\globalStorage\<extension-id>\codebase-index.json`  
+> You can open this file to inspect the chunks and their embedding vectors.
 
 ---
 
@@ -99,10 +110,9 @@ Press **F5** in VS Code. A new Extension Development Host window opens.
 
 ```
 src/
-├── extension.ts   — activation entry point, sidebar webview registration, loads .env
-├── indexer.ts     — file walker, text splitter, OpenAI embeddings, HNSWLib vector store save
-├── retriever.ts   — similarity search, Groq LLM call, returns answer + source citations
-└── chatPanel.ts   — (reserved for future standalone panel)
+├── extension.ts   — activation entry point, sidebar webview registration
+├── indexer.ts     — file walker, text splitter, Ollama embeddings, JSON index save
+└── retriever.ts   — cosine similarity search, Groq LLM call, returns answer + source citations
 
 media/
 └── icon.svg       — activity bar icon
@@ -112,9 +122,9 @@ media/
 
 | Concern | Choice | Reason |
 |---|---|---|
-| Embeddings | `@langchain/openai` | Best quality, standard |
-| Vector store | `HNSWLib` (via `@langchain/community`) | Runs fully in-process, no Docker/server needed |
-| LLM | Groq (`llama3-70b-8192`) | Free tier, extremely fast inference |
+| Embeddings | Ollama (`nomic-embed-text`) | Runs fully locally — free, no API key, no usage limits |
+| Vector search | Pure-JS cosine similarity over JSON | No native C++ deps — works in any VS Code extension out of the box |
+| LLM | Groq (`llama-3.1-8b-instant`) | Free tier, extremely fast inference |
 | Chunking | `RecursiveCharacterTextSplitter` (500 tokens, 50 overlap) | Respects code structure |
 
 ---
@@ -144,13 +154,27 @@ I tried writing them into VS Code settings via `config.update()` inside `activat
 **How I solved it:**
 
 1. Used `dotenv.config({ path: envPath })` — which is **synchronous** — at the very start of `activate()`, before registering anything. This immediately populates `process.env`.
-2. In `indexer.ts` and `retriever.ts`, added a fallback:
-   ```typescript
-   const apiKey = config.get<string>('openaiApiKey') || process.env.OPEN_AI_API_KEY;
-   ```
-   If a user has manually set the key in VS Code settings, that wins. Otherwise, `process.env` (loaded by dotenv) is used. No async writes, no race conditions.
+2. In `retriever.ts`, only the Groq key is now required. Embeddings are handled by Ollama locally with no key needed at all.
 
 The core lesson: **don't mix async config writes with synchronous reads in the activation flow** — if you need something available immediately, `process.env` is your friend.
+
+### Problem 3: Switching from OpenAI embeddings to Ollama
+
+The original version used OpenAI's `text-embedding-ada-002` for embeddings, which costs money per token. To make this completely free, I switched to [Ollama](https://ollama.com) running `nomic-embed-text` locally.
+
+The change was straightforward in LangChain — swap `OpenAIEmbeddings` for `OllamaEmbeddings` — but it also uncovered a silent bug: the old API key guard (`if (!openaiKey || !groqKey)`) was still in `retriever.ts` after the switch. Since `openaiKey` is now always empty, **every query was silently returning "Missing API keys"** before even touching the index. Removing that dead check unblocked everything.
+
+### Problem 4: HNSWLib requires native C++ build tools
+
+The original version used HNSWLib as the vector store via `@langchain/community`. This worked fine in a Node.js script but failed inside a VS Code extension because `hnswlib-node` is a **native C++ addon** that needs to be compiled at install time — requiring Python and Visual C++ Build Tools (MSVC).
+
+Rather than requiring every user to install build tools, the vector store was replaced with a **pure-JS implementation**: the index is saved as a plain `codebase-index.json` file (each chunk's text + its embedding vector), and similarity search is done with a simple cosine similarity function at query time. This has zero native dependencies and works anywhere Node.js runs.
+
+> If you prefer HNSWLib, install Windows Build Tools with:
+> ```
+> npm install --global windows-build-tools  # run as Administrator
+> npm install hnswlib-node --legacy-peer-deps
+> ```
 
 ---
 
@@ -198,7 +222,7 @@ This saved me a lot of trial and error on architecture decisions. The most valua
 
 - **Language:** TypeScript
 - **VS Code API:** Webview panels, commands, workspace configuration
-- **LangChain.js:** `@langchain/openai`, `@langchain/community`, `@langchain/textsplitters`
-- **Vector store:** HNSWLib (in-process, no server)
-- **LLM:** Groq (`llama3-70b-8192`)
-- **Embeddings:** OpenAI (`text-embedding-ada-002`)
+- **LangChain.js:** `@langchain/ollama`, `@langchain/community`, `@langchain/textsplitters`, `@langchain/core`
+- **Embeddings:** Ollama (`nomic-embed-text`) — local, free, no API key
+- **Vector search:** Pure-JS cosine similarity over a JSON index
+- **LLM:** Groq (`llama-3.1-8b-instant`)
