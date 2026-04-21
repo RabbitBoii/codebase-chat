@@ -8,7 +8,8 @@ import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
 const INCLUDE_EXTENSIONS = [
     '.ts', '.tsx', '.js', '.jsx',
     '.py', '.go', '.rs', '.java',
-    '.md', '.json', '.env.example'
+    // '.md',
+    '.json', '.env.example'
 ];
 
 // Folders to always skip
